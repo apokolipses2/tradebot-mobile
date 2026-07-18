@@ -22,7 +22,7 @@ import threading
 import webbrowser
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 
 # ------------------------------ config ------------------------------
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
@@ -68,6 +68,32 @@ def fetch_spot_gold():
     req = urllib.request.Request(SPOT_GOLD_URL, headers={"User-Agent": UA})
     with urllib.request.urlopen(req, context=_SSL, timeout=12) as r:
         return json.load(r).get("price")
+
+
+_news_cache = {}   # query -> (timestamp, list)
+
+
+def fetch_news(query, count=6):
+    url = f"https://query1.finance.yahoo.com/v1/finance/search?q={quote(query)}&newsCount={count}&quotesCount=0"
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, context=_SSL, timeout=12) as r:
+        j = json.load(r)
+    return [{"title": n.get("title", ""), "publisher": n.get("publisher", ""),
+             "link": n.get("link", ""), "time": n.get("providerPublishTime", 0)}
+            for n in j.get("news", [])[:count]]
+
+
+def cached_news(query):
+    now = time.time()
+    hit = _news_cache.get(query)
+    if hit and now - hit[0] < 300:      # news changes slowly — cache 5 min
+        return hit[1]
+    try:
+        res = fetch_news(query)
+    except Exception:
+        res = []
+    _news_cache[query] = (now, res)
+    return res
 
 
 def ema(vals, n):
@@ -136,17 +162,69 @@ def bollinger_dir(closes, n=20, k=2):
     return 0, "mid-band"
 
 
+def _cm(k):
+    o, h, l, cl = k["o"], k["h"], k["l"], k["cl"]
+    body = abs(cl - o); rng = (h - l) or 1e-9
+    up = h - max(o, cl); lo = min(o, cl) - l
+    return o, h, l, cl, body, rng, up, lo
+
+
 def candle_dir(candles):
-    if len(candles) < 2: return 0, "not enough data"
-    p, k = candles[-2], candles[-1]
-    body = abs(k["cl"] - k["o"]); rng = (k["h"] - k["l"]) or 1e-9
-    up = k["h"] - max(k["o"], k["cl"]); lo = min(k["o"], k["cl"]) - k["l"]
-    pB, pS = p["cl"] > p["o"], p["cl"] < p["o"]; kB, kS = k["cl"] > k["o"], k["cl"] < k["o"]
-    if pS and kB and k["cl"] >= p["o"] and k["o"] <= p["cl"]: return 1, "bullish engulfing"
-    if pB and kS and k["o"] >= p["cl"] and k["cl"] <= p["o"]: return -1, "bearish engulfing"
-    if body <= rng * 0.1: return 0, "doji"
-    if lo >= body * 2 and up <= body * 0.6: return 1, "hammer"
-    if up >= body * 2 and lo <= body * 0.6: return -1, "shooting star"
+    """Detect a candlestick pattern on the latest candle(s): 3-candle -> 2-candle -> 1-candle (~20 patterns)."""
+    if not candles:
+        return 0, "no data"
+    o, h, l, cl, body, rng, up, lo = _cm(candles[-1])
+    bull, bear = cl > o, cl < o
+
+    # ---- three-candle patterns (strongest) ----
+    if len(candles) >= 3:
+        ao, ah, al, acl, abody, arng, aup, alo = _cm(candles[-3])
+        bo, bh, bl, bcl, bbody, brng, bup, blo = _cm(candles[-2])
+        if acl < ao and bbody < abody * 0.5 and bull and cl > (ao + acl) / 2:
+            return 1, "morning star"
+        if acl > ao and bbody < abody * 0.5 and bear and cl < (ao + acl) / 2:
+            return -1, "evening star"
+        if acl > ao and bcl > bo and bull and acl < bcl < cl and min(abody, bbody, body) > rng * 0.4:
+            return 1, "three white soldiers"
+        if acl < ao and bcl < bo and bear and acl > bcl > cl and min(abody, bbody, body) > rng * 0.4:
+            return -1, "three black crows"
+
+    # ---- two-candle patterns ----
+    if len(candles) >= 2:
+        po, ph, pl, pcl, pbody, prng, pup, plo = _cm(candles[-2])
+        pbull, pbear = pcl > po, pcl < po
+        if pbear and bull and cl >= po and o <= pcl:
+            return 1, "bullish engulfing"
+        if pbull and bear and o >= pcl and cl <= po:
+            return -1, "bearish engulfing"
+        if pbear and bull and o < pcl and (po + pcl) / 2 < cl < po:
+            return 1, "piercing line"
+        if pbull and bear and o > pcl and po < cl < (po + pcl) / 2:
+            return -1, "dark cloud cover"
+        if pbear and bull and body < pbody * 0.6 and o >= pcl and cl <= po:
+            return 1, "bullish harami"
+        if pbull and bear and body < pbody * 0.6 and o <= pcl and cl >= po:
+            return -1, "bearish harami"
+        if pbear and bull and abs(l - pl) <= rng * 0.08:
+            return 1, "tweezer bottom"
+        if pbull and bear and abs(h - ph) <= rng * 0.08:
+            return -1, "tweezer top"
+
+    # ---- single-candle patterns ----
+    if body <= rng * 0.1:
+        if lo >= rng * 0.6 and up <= rng * 0.15:
+            return 1, "dragonfly doji"
+        if up >= rng * 0.6 and lo <= rng * 0.15:
+            return -1, "gravestone doji"
+        return 0, "doji — indecision"
+    if body >= rng * 0.9:
+        return (1, "bullish marubozu") if bull else (-1, "bearish marubozu")
+    if lo >= body * 2 and up <= body * 0.6:
+        return 1, "hammer"
+    if up >= body * 2 and lo <= body * 0.6:
+        return -1, "shooting star"
+    if lo >= body * 1.5 and up >= body * 1.5:
+        return 0, "spinning top"
     return 0, "no clear pattern"
 
 
@@ -240,6 +318,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps(cached_signal(*inst)))
             except Exception as e:
                 self._send(200, json.dumps({"error": str(e)}))
+        elif u.path == "/api/news":
+            q = parse_qs(u.query)
+            sym = (q.get("symbol") or [INSTRUMENTS[0][1]])[0]
+            inst = next((i for i in INSTRUMENTS if i[1] == sym), INSTRUMENTS[0])
+            query = {"GC=F": "gold price", "NQ=F": "nasdaq 100", "ES=F": "s&p 500"}.get(sym, inst[0])
+            self._send(200, json.dumps(cached_news(query)))
         else:
             self._send(404, "not found", "text/plain")
 
@@ -273,6 +357,10 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
   .note{color:var(--dim);font-size:11px;font-style:italic;margin-top:8px}
   .rr{color:var(--gold);font-weight:800;margin-top:8px}
   .muted{color:var(--dim);text-align:center;padding:8px}
+  .news{display:block;padding:9px 0;border-bottom:1px solid var(--line);text-decoration:none}
+  .news:last-child{border-bottom:none}
+  .nt{color:var(--txt);font-size:13px;line-height:1.35}
+  .ns{color:var(--dim);font-size:11px;margin-top:3px}
   .c-buy{color:var(--buy)}.c-sell{color:var(--sell)}.c-wait{color:var(--wait)}.c-dim{color:var(--dim)}
   .p-buy{background:#0f2a1c;color:var(--buy)}.p-sell{background:#2c1414;color:var(--sell)}.p-wait{background:#1a2130;color:var(--dim)}
 </style></head><body>
@@ -307,6 +395,11 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
     <div id="why"></div>
   </div>
 
+  <div class="card">
+    <div class="lbl">📰 NEWS · tap a headline to read</div>
+    <div id="news"><div class="muted">loading headlines…</div></div>
+  </div>
+
 <script>
 let sym=null, instruments=[];
 const $=id=>document.getElementById(id);
@@ -317,8 +410,17 @@ async function boot(){
   instruments=await (await fetch("/api/instruments")).json();
   sym=instruments[0].symbol;
   $("tabs").innerHTML=instruments.map(i=>`<button class="tab" data-s="${i.symbol}">${i.name}</button>`).join("");
-  document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{sym=t.dataset.s;paint();load();});
-  paint(); load(); setInterval(load, 8000);
+  document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{sym=t.dataset.s;paint();load();loadNews();});
+  paint(); load(); loadNews(); setInterval(load, 8000); setInterval(loadNews, 120000);
+}
+function esc(s){ return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c])); }
+function ago(ts){ if(!ts) return ""; const s=Date.now()/1000-ts; if(s<3600) return Math.max(1,Math.floor(s/60))+"m ago"; if(s<86400) return Math.floor(s/3600)+"h ago"; return Math.floor(s/86400)+"d ago"; }
+async function loadNews(){
+  try{
+    const items=await (await fetch("/api/news?symbol="+encodeURIComponent(sym))).json();
+    if(!items.length){ $("news").innerHTML='<div class="muted">no recent headlines</div>'; return; }
+    $("news").innerHTML=items.map(n=>`<a class="news" href="${esc(n.link)}" target="_blank" rel="noopener"><div class="nt">${esc(n.title)}</div><div class="ns">${esc(n.publisher)}${n.time?" · "+ago(n.time):""}</div></a>`).join("");
+  }catch(e){ $("news").innerHTML='<div class="muted">couldn\'t load news</div>'; }
 }
 function paint(){ document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.dataset.s===sym)); }
 
