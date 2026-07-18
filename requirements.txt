@@ -1,0 +1,2 @@
+# TradeBot Mobile uses only the Python standard library — no packages needed.
+# This file just tells the host "this is a Python app."
