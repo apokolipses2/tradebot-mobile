@@ -28,10 +28,12 @@ from urllib.parse import urlparse, parse_qs
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
 CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval={iv}&range={rng}"
 SPOT_GOLD_URL = "https://api.gold-api.com/price/XAU"
-INSTRUMENTS = [("Gold", "GC=F", "spot-gold"), ("Nasdaq 100", "NQ=F", None),
-               ("S&P 500", "ES=F", None), ("Bitcoin", "BTC-USD", None)]
-TFS = [("1m", "1d", 1), ("5m", "5d", 3), ("15m", "5d", 3), ("1h", "1mo", 2)]
-PRIMARY_TF = "5m"
+# STOCKS (user trades stocks, not crypto). Easy to swap — just tell Claude which tickers you trade.
+INSTRUMENTS = [("NVIDIA", "NVDA", None), ("Apple", "AAPL", None), ("Tesla", "TSLA", None),
+               ("Amazon", "AMZN", None), ("Meta", "META", None), ("Microsoft", "MSFT", None)]
+# longer timeframes only (15m/30m/1h) — less noise, more 'understandable' than 1m/5m scalping
+TFS = [("15m", "5d", 1), ("30m", "1mo", 2), ("1h", "1mo", 3)]
+PRIMARY_TF = "30m"
 FAST, SLOW, RSI_N = 9, 21, 14
 STALE_SEC = 1800
 CACHE_TTL = 12          # seconds to cache each market's analysis (keeps it snappy + gentle on data source)
@@ -296,11 +298,11 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
   <div class="card plan">
     <div class="lbl">TRADE PLAN · entry / stop / target</div>
     <div id="plan"></div>
-    <div class="note">stop = 1.5× the 5m ATR (volatility-based) · target = 2× your risk</div>
+    <div class="note">stop = 1.5× the 30m ATR (volatility-based) · target = 2× your risk</div>
   </div>
 
   <div class="card">
-    <div class="lbl">WHY · 5m chart</div>
+    <div class="lbl">WHY · 30m chart</div>
     <div id="why"></div>
   </div>
 
