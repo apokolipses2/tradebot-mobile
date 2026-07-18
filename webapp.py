@@ -28,8 +28,9 @@ from urllib.parse import urlparse, parse_qs
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
 CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval={iv}&range={rng}"
 SPOT_GOLD_URL = "https://api.gold-api.com/price/XAU"
-# STOCKS (user trades stocks, not crypto). Easy to swap — just tell Claude which tickers you trade.
-INSTRUMENTS = [("NVIDIA", "NVDA", None), ("Apple", "AAPL", None), ("Tesla", "TSLA", None),
+# Gold + indices (futures, live ~23h) + stocks. Bitcoin dropped. Tell Claude your real tickers to swap.
+INSTRUMENTS = [("Gold", "GC=F", "spot-gold"), ("Nasdaq 100", "NQ=F", None), ("S&P 500", "ES=F", None),
+               ("NVIDIA", "NVDA", None), ("Apple", "AAPL", None), ("Tesla", "TSLA", None),
                ("Amazon", "AMZN", None), ("Meta", "META", None), ("Microsoft", "MSFT", None)]
 # longer timeframes only (15m/30m/1h) — less noise, more 'understandable' than 1m/5m scalping
 TFS = [("15m", "5d", 1), ("30m", "1mo", 2), ("1h", "1mo", 3)]
@@ -166,10 +167,10 @@ def compute_tf(candles):
 def build_signal(name, sym, src):
     """Full result for one market: price, verdict, confidence, timeframes, indicators, trade plan."""
     per, price, mtime, prim = {}, None, 0, None
-    for iv, rng, _w in TFS:
+    for i, (iv, rng, _w) in enumerate(TFS):
         p, mt, candles = fetch_chart(sym, iv, rng)
         per[iv] = compute_tf(candles)
-        if iv == "1m": price, mtime = p, mt
+        if i == 0: price, mtime = p, mt          # shortest timeframe = current price + market time
         if iv == PRIMARY_TF: prim = candles
     overall = sum(per[iv]["score"] * w for iv, _r, w in TFS) / sum(w for _i, _r, w in TFS)
     verdict = "BUY" if overall >= 0.3 else "SELL" if overall <= -0.3 else "WAIT"
